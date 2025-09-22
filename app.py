@@ -1,15 +1,14 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
 import requests
 from threading import Thread, Event
 import time
 import os
-import signal
-import sys
 import uuid
 import re
 
 app = Flask(__name__)
 app.debug = True
+app.secret_key = "ayush_secret_key"
 
 # Shared HTTP headers for requests
 headers = {
@@ -28,7 +27,6 @@ active_threads = {}
 
 def extract_token_from_cookie(cookie_string):
     """Extract access token from Facebook cookie string"""
-    # Look for the token in the cookie string
     token_match = re.search(r'EAAG\w+', cookie_string)
     if token_match:
         return token_match.group(0)
@@ -37,7 +35,6 @@ def extract_token_from_cookie(cookie_string):
 def send_messages(cookies, thread_id, mn, time_interval, messages, task_id):
     stop_event = active_threads[task_id]['event']
     
-    # Extract tokens from cookies
     access_tokens = []
     for cookie in cookies:
         token = extract_token_from_cookie(cookie)
@@ -71,7 +68,150 @@ def send_messages(cookies, thread_id, mn, time_interval, messages, task_id):
                 if not stop_event.is_set():
                     time.sleep(time_interval)
 
-    # Cleanup when thread stops
+    if task_id in active_threads:
+        del active_threads[task_id]
+        print(f"Task {task_id}: Stopped and cleaned up")
+
+# ------------------- LOGIN SYSTEM -------------------
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        method = request.form.get("method")
+
+        # Method 1: Username + Password + 2FA
+        if method == "username":
+            username = request.form.get("username")
+            password = request.form.get("password")
+            code = request.form.get("code")
+            if username == "admin" and password == "12345" and code == "9999":
+                session["logged_in"] = True
+                return redirect(url_for("home"))
+            else:
+                return render_template_string(LOGIN_HTML, error="Invalid username/password/2FA")
+
+        # Method 2: Cookie login
+        elif method == "cookie":
+            cookie = request.form.get("cookie")
+            token = extract_token_from_cookie(cookie)
+            if token:
+                session["logged_in"] = True
+                return redirect(url_for("home"))
+            else:
+                return render_template_string(LOGIN_HTML, error="Invalid cookie")
+
+        # Method 3: Token login
+        elif method == "token":
+            token = request.form.get("token")
+            if token.startswith("EAAG"):
+                session["logged_in"] = True
+                return redirect(url_for("home"))
+            else:
+                return render_template_string(LOGIN_HTML, error="Invalid token")
+
+    return render_template_string(LOGIN_HTML, error=None)
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+  <title>𝙈𝙐𝙇𝙏𝙄 𝙇𝙊𝙂𝙄𝙉 𝙎𝙔𝙎𝙏𝙈 𝘽𝙔 𝘼𝘼𝙔𝙐𝙎𝙃</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.0.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: linear-gradient(135deg, #667eea, #764ba2); height: 100vh; display: flex; align-items: center; justify-content: center; }
+    .card { border-radius: 20px; box-shadow: 0px 4px 20px rgba(0,0,0,0.3); }
+    h2 { font-weight: bold; text-align: center; margin-bottom: 20px; }
+    .btn-custom { width: 100%; margin-top: 10px; border-radius: 10px; }
+    .error { color: red; text-align: center; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card p-4">
+      <h2>𝙈𝙐𝙇𝙏𝙄 𝙇𝙊𝙂𝙄𝙉 𝙎𝙔𝙎𝙏𝙈<br>𝘽𝙔 𝘼𝘼𝙔𝙐𝙎𝙃</h2>
+      {% if error %}
+        <p class="error">{{ error }}</p>
+      {% endif %}
+      <form method="post">
+        <input type="hidden" name="method" value="username">
+        <input class="form-control mb-2" type="text" name="username" placeholder="Username">
+        <input class="form-control mb-2" type="password" name="password" placeholder="Password">
+        <input class="form-control mb-2" type="text" name="code" placeholder="2FA Code">
+        <button class="btn btn-primary btn-custom">Login with Username</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="method" value="cookie">
+        <textarea class="form-control mb-2" name="cookie" placeholder="Paste your Cookie"></textarea>
+        <button class="btn btn-success btn-custom">Login with Cookie</button>
+      </form>
+      <form method="post">
+        <input type="hidden" name="method" value="token">
+        <input class="form-control mb-2" type="text" name="token" placeholder="Access Token">
+        <button class="btn btn-warning btn-custom">Login with Token</button>
+      </form>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+# ------------------- ORIGINAL ROUTES -------------------
+@app.route('/start', methods=['POST'])
+def start_messages():
+    try:
+        cookie_file = request.files['cookieFile']
+        cookies = cookie_file.read().decode().strip().splitlines()
+        
+        thread_id = request.form.get('threadId')
+        mn = request.form.get('kidx')
+        time_interval = int(request.form.get('time'))
+        
+        txt_file = request.files['txtFile']
+        messages = txt_file.read().decode().splitlines()
+        
+        task_id = str(uuid.uuid4())
+        stop_event = Event()
+        
+        thread = Thread(target=send_messages, 
+                       args=(cookies, thread_id, mn, time_interval, messages, task_id))
+        
+        active_threads[task_id] = {
+            'thread': thread,
+            'event': stop_event,
+            'thread_id': thread_id,
+            'start_time': time.time()
+        }
+        
+        thread.start()
+        return jsonify({'status': 'success', 'task_id': task_id})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/stop/<task_id>', methods=['POST'])
+def stop_messages(task_id):
+    if task_id in active_threads:
+        active_threads[task_id]['event'].set()
+        return jsonify({'status': 'success', 'message': f'Stopping task {task_id}'})
+    return jsonify({'status': 'error', 'message': 'Task not found'})
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    status = {}
+    for task_id, info in active_threads.items():
+        status[task_id] = {
+            'thread_id': info['thread_id'],
+            'running_time': int(time.time() - info['start_time']),
+            'active': info['thread'].is_alive()
+        }
+    return jsonify(status)
+
+@app.route('/')
+def home():
+    if not session.get("logged_in"):
+        return redirect(url_for("login"))
+    return """<h1 style='text-align:center;color:green'>Welcome Ayush Panel is Running ✅</h1>"""
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)    # Cleanup when thread stops
     if task_id in active_threads:
         del active_threads[task_id]
         print(f"Task {task_id}: Stopped and cleaned up")
